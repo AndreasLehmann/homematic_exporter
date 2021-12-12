@@ -18,6 +18,9 @@ from prometheus_client import Gauge, Counter, Enum, MetricsHandler, core, Summar
 
 class HomematicMetricsProcessor(threading.Thread):
 
+    BidcosRF_port = 2001
+    HmIP_port = 2010
+
     METRICS_NAMESPACE = 'homematic'
     # Supported Homematic (BidcosRF and IP) device types
     DEFAULT_SUPPORTED_TYPES = [
@@ -60,6 +63,7 @@ class HomematicMetricsProcessor(threading.Thread):
         'HM-Sec-TiS',
         'HM-Sen-LI-O',
         'HM-Sen-MDIR-O',
+        'HM-Sen-MDIR-O-2',
         'HM-Sen-MDIR-WM55',
         'HM-SwI-3-FM',
         'HM-TC-IT-WM-W-EU',
@@ -67,6 +71,11 @@ class HomematicMetricsProcessor(threading.Thread):
         'HM-WDS100-C6-O-2',
         'HM-WDS30-OT2-SM',
         'HM-WDS40-TH-I-2',
+        'HM-Sec-SFA-SM',
+        'HM-Sec-RHS',
+        'HmIP-SRH',
+        'HmIP-SCI',
+        'HM-LC-Sw1-Pl-DN-R1',
     ]
 
     # A list with channel numbers for devices where getParamset
@@ -85,6 +94,7 @@ class HomematicMetricsProcessor(threading.Thread):
         'HM-OU-CFM-Pl': [1, 2],
         'HM-OU-CFM-TW': [1, 2],
         'HM-Sen-MDIR-O': [1],
+        'HM-Sen-MDIR-O-2': [1],
         'HM-Sen-MDIR-WM55': [3],
         'HM-TC-IT-WM-W-EU': [7],
         'HM-WDS30-OT2-SM': [1, 2, 3, 4, 5],
@@ -116,6 +126,7 @@ class HomematicMetricsProcessor(threading.Thread):
         read_names_summary = Summary('read_names_seconds', 'Time spent reading names from CCU', labelnames=['ccu'], namespace=self.METRICS_NAMESPACE)
 
         gathering_loop_counter = 1
+        reload_names_active = False
 
         if len(self.mapped_names) == 0:
             # if no custom mapped names are given we use them from the ccu.
@@ -177,63 +188,80 @@ class HomematicMetricsProcessor(threading.Thread):
         self.devicecount = Gauge('devicecount', 'Number of processed/supported devices', labelnames=['ccu'], namespace=self.METRICS_NAMESPACE)
 
     def generate_metrics(self):
-        logging.info("Gathering metrics")
+        logging.info("Gathering metrics for Bidcos Devices")
 
+        # authentication not supported!
+        self.ccu_url = "http://{}:{}".format(self.ccu_host, self.BidcosRF_port)
         for device in self.fetch_devices_list():
-            devType = device.get('TYPE')
-            devParentType = device.get('PARENT_TYPE')
-            devParentAddress = device.get('PARENT')
-            devAddress = device.get('ADDRESS')
-            if devParentAddress == '':
-                if devType in self.supported_device_types:
-                    devChildcount = len(device.get('CHILDREN'))
-                    logging.info("Found top-level device {} of type {} with {} children".format(devAddress, devType, devChildcount))
-                    logging.debug(pformat(device))
-                else:
-                    logging.info("Found unsupported top-level device {} of type {}".format(devAddress, devType))
-            if devParentType in self.supported_device_types:
-                logging.debug("Found device {} of type {} in supported parent type {}".format(devAddress, devType, devParentType))
+            self.generate_device_metric( device )
+
+        logging.info("Gathering metrics for HmIP Devices")
+        # authentication not supported!
+        self.ccu_url = "http://{}:{}".format(self.ccu_host, self.HmIP_port)
+        for device in self.fetch_devices_list():
+            self.generate_device_metric( device )
+        
+
+        
+    def generate_device_metric(self, device):
+        devType = device.get('TYPE')
+        devParentType = device.get('PARENT_TYPE')
+        devParentAddress = device.get('PARENT')
+        devAddress = device.get('ADDRESS')
+        
+        global paramset
+
+        if devParentAddress == '':
+            if devType in self.supported_device_types:
+                devChildcount = len(device.get('CHILDREN'))
+                logging.info("Found top-level device {} of type {} with {} children".format(devAddress, devType, devChildcount))
                 logging.debug(pformat(device))
+            else:
+                logging.info("Found unsupported top-level device {} of type {}".format(devAddress, devType))
+        if devParentType in self.supported_device_types:
+            logging.debug("Found device {} of type {} in supported parent type {}".format(devAddress, devType, devParentType))
+            logging.debug(pformat(device))
 
-                allowFailedChannel = False
-                invalidChannels = self.channels_with_errors_allowed.get(devParentType)
-                if invalidChannels is not None:
-                    channel = int(devAddress[devAddress.find(":") + 1:])
-                    if channel in invalidChannels:
-                        allowFailedChannel = True
+            allowFailedChannel = False
+            invalidChannels = self.channels_with_errors_allowed.get(devParentType)
+            if invalidChannels is not None:
+                channel = int(devAddress[devAddress.find(":") + 1:])
+                if channel in invalidChannels:
+                    allowFailedChannel = True
 
-                if 'VALUES' in device.get('PARAMSETS'):
-                    paramsetDescription = self.fetch_param_set_description(devAddress)
-                    try:
-                        paramset = self.fetch_param_set(devAddress)
-                    except xmlrpc.client.Fault:
-                        if allowFailedChannel:
-                            logging.debug("Error reading paramset for device {} of type {} in parent type {} (expected)".format(
-                                devAddress, devType, devParentType))
-                        else:
-                            logging.debug("Error reading paramset for device {} of type {} in parent type {} (unexpected)".format(
-                                devAddress, devType, devParentType))
-                            raise
+            if 'VALUES' in device.get('PARAMSETS'):
+                paramsetDescription = self.fetch_param_set_description(devAddress)
+                try:
+                    paramset = self.fetch_param_set(devAddress)
+                    
+                except xmlrpc.client.Fault:
+                    if allowFailedChannel:
+                        logging.debug("Error reading paramset for device {} of type {} in parent type {} (expected)".format(
+                            devAddress, devType, devParentType))
+                    else:
+                        logging.debug("Error reading paramset for device {} of type {} in parent type {} (unexpected)".format(
+                            devAddress, devType, devParentType))
+                        raise
+                
+                for key in paramsetDescription:
+                    paramDesc = paramsetDescription.get(key)
+                    paramType = paramDesc.get('TYPE')
+                    if paramType in ['FLOAT', 'INTEGER', 'BOOL']:
+                        self.process_single_value(devAddress, devType, devParentAddress, devParentType, paramType, key, paramset.get(key))
+                    elif paramType == 'ENUM':
+                        logging.debug("Found {}: desc: {} key: {}".format(paramType, paramDesc, paramset.get(key)))
+                        self.process_enum(devAddress, devType, devParentAddress, devParentType,
+                                            paramType, key, paramset.get(key), paramDesc.get('VALUE_LIST'))
+                    else:
+                        # ATM Unsupported like HEATING_CONTROL_HMIP.PARTY_TIME_START,
+                        # HEATING_CONTROL_HMIP.PARTY_TIME_END, COMBINED_PARAMETER or ACTION
+                        logging.debug("Unknown paramType {}, desc: {}, key: {}".format(paramType, paramDesc, paramset.get(key)))
 
-                    for key in paramsetDescription:
-                        paramDesc = paramsetDescription.get(key)
-                        paramType = paramDesc.get('TYPE')
-                        if paramType in ['FLOAT', 'INTEGER', 'BOOL']:
-                            self.process_single_value(devAddress, devType, devParentAddress, devParentType, paramType, key, paramset.get(key))
-                        elif paramType == 'ENUM':
-                            logging.debug("Found {}: desc: {} key: {}".format(paramType, paramDesc, paramset.get(key)))
-                            self.process_enum(devAddress, devType, devParentAddress, devParentType,
-                                              paramType, key, paramset.get(key), paramDesc.get('VALUE_LIST'))
-                        else:
-                            # ATM Unsupported like HEATING_CONTROL_HMIP.PARTY_TIME_START,
-                            # HEATING_CONTROL_HMIP.PARTY_TIME_END, COMBINED_PARAMETER or ACTION
-                            logging.debug("Unknown paramType {}, desc: {}, key: {}".format(paramType, paramDesc, paramset.get(key)))
-
-                    if paramset:
-                        logging.debug("ParamsetDescription for {}".format(devAddress))
-                        logging.debug(pformat(paramsetDescription))
-                        logging.debug("Paramset for {}".format(devAddress))
-                        logging.debug(pformat(paramset))
+                if paramset:
+                    logging.debug("ParamsetDescription for {}".format(devAddress))
+                    logging.debug(pformat(paramsetDescription))
+                    logging.debug("Paramset for {}".format(devAddress))
+                    logging.debug(pformat(paramset))
 
     def create_proxy(self):
         transport = xmlrpc.client.Transport()
@@ -368,7 +396,8 @@ if __name__ == '__main__':
 
     PARSER = argparse.ArgumentParser()
     PARSER.add_argument("--ccu_host", help="The hostname of the ccu instance", required=True)
-    PARSER.add_argument("--ccu_port", help="The port for the xmlrpc service (2001 for BidcosRF, 2010 for HmIP)", default=2010)
+    # LEH not used at the moment - query both addresses!
+    #PARSER.add_argument("--ccu_port", help="The port for the xmlrpc service (2001 for BidcosRF, 2010 for HmIP)", default=2010)
     PARSER.add_argument("--ccu_user", help="The username for the CCU (if authentication is enabled)")
     PARSER.add_argument("--ccu_pass", help="The password for the CCU (if authentication is enabled)")
     PARSER.add_argument("--interval", help="The interval between two gathering runs in seconds", default=60)
@@ -390,7 +419,8 @@ if __name__ == '__main__':
     if ARGS.ccu_user and ARGS.ccu_pass:
         auth = (ARGS.ccu_user, ARGS.ccu_pass)
 
-    PROCESSOR = HomematicMetricsProcessor(ARGS.ccu_host, ARGS.ccu_port, auth, ARGS.interval, ARGS.namereload, ARGS.config_file)
+    # port was set to 0
+    PROCESSOR = HomematicMetricsProcessor(ARGS.ccu_host, 0 , auth, ARGS.interval, ARGS.namereload, ARGS.config_file)
 
     if ARGS.dump_devices:
         print(pformat(PROCESSOR.fetch_devices_list()))
